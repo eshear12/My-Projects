@@ -1,0 +1,913 @@
+---
+title: "Data Science Final Project"
+author: "Team 40: Aayush Chordia (ac830), Haoyang Dong (hd102), Deepika Karan (dr287), Ethan Shear (els94), Anh Tuong (avt8)"
+date: "October 14, 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries & CSV's
+```{r}
+# libraries
+library(tidyverse)
+library(ggpubr)
+library(baseballr)
+library(lubridate)
+library(data.table)
+library(arsenal)
+library(stargazer)
+library(reshape)
+library(scales)
+library(GGally)
+library(glmnet)
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+library(Metrics)
+
+# Read in baseball data
+# install.packages("Lahman")
+library(Lahman)
+
+# read in the inflation data
+inflation <- read.csv("InflationAdjustment.csv")
+# read in valuation data
+valuedfTrain <- read.csv("mlbValuations.csv")
+  keepTrain <- c("yearID", "Valuation", "TeamID", "CurTeamID")
+  valKeepTrain <- valuedfTrain[,(names(valuedfTrain) %in% keepTrain)]
+  as.numeric(valKeepTrain$Valuation)
+  valuedfTrain <- valKeepTrain[1:630,]
+
+
+# read in train data
+baseball <- read.csv("Team40_TrainSet_DSFINAL.csv")
+  # Dropping playerID for the modeling part
+  baseball <- baseball[!names(baseball) %in% c("playerID")]
+  # Dropping X for the modeling part
+  baseball <- baseball %>% select(-X)
+  # Dropping several players without key pieces of info for the modeling part
+  baseball <- baseball[!(is.na(baseball$xbhPerhits) | is.na(baseball$FieldingPerc)),]
+
+  # read in test data
+deployment <- read.csv("Team40_TestSet_DSFINAL.csv")
+#  deployment <- deployment %>% select(-X)
+
+# Creating Names Table for final results clairty
+dep_names <- 
+  People %>% 
+  select(playerID, nameFirst, nameLast) %>% 
+  filter(playerID %in% deployment$playerID) %>% 
+  mutate(Names = paste0(substr(nameFirst, 1, 20), " ", substr(nameLast, 1, 20))) %>% 
+  select(playerID, Names)
+
+# manually creating a not in function
+`%notin%` <- Negate(`%in%`)
+```
+
+# Train Set: Cleaning (Don't Run -- Upload CSV)
+```{r}
+#################################################################################
+### Only the players that debut in/after 1985 and retire in/before 2016
+#################################################################################
+# changing data types for manipulation
+People$debut <- as.Date(People$debut)
+People$finalGame <- as.Date(People$finalGame)
+# sub-setting people into only the years with salary information to train model
+playersTrain <- 
+  People %>% 
+  filter(year(debut) >= 1985,
+        year(finalGame) <= 2016) %>%
+    select(playerID, nameFirst, nameLast, birthCountry, bats, throws, debut, finalGame, birthYear) %>%
+    arrange(desc(finalGame))
+# grabbing the year from debut to remove rookies
+playersTrain$debutYear <- year(playersTrain$debut)
+# USED TO REMOVE ROOKIE SEASONS FROM FINAL DF (TOO MANY LEAGUE MIN SALARIES)
+playersfinTrain <- playersTrain[,c("playerID", "debutYear", "birthYear")]
+
+#################################################################################
+### award winners in the 1985-2016 range
+relAwardsTrain <- c("Most Valuable Player","Silver Slugger", 
+               "Gold Glove", "Rookie of the Year","Hank Aaron Award")
+# Taking important columns and filtering by year range for award winners
+winnersTrain <- 
+    AwardsPlayers %>% 
+    filter(yearID >= 1985, yearID <= 2016) %>%
+    select(playerID, awardID, yearID)
+# taking only winners of awards important to our modeling
+award_winnersTrain <- winnersTrain[winnersTrain$awardID %in% relAwardsTrain,]
+# creating dummy variables for the awards
+award_winnersTrain$GG <- ifelse(award_winnersTrain$awardID == "Gold Glove", 1, 0)
+award_winnersTrain$MVP <- ifelse(award_winnersTrain$awardID == "Most Valuable Player", 1, 0)
+award_winnersTrain$SilvSlug <- ifelse(award_winnersTrain$awardID == "Silver Slugger", 1, 0)
+award_winnersTrain$HankAaron <- ifelse(award_winnersTrain$awardID == "Hank Aaron Award", 1, 0)
+award_winnersTrain$RookOfYear <- ifelse(award_winnersTrain$awardID == "Rookie of the Year", 1, 0)
+# aggregating by player and year to show people that won multiple awards in a season
+AwardsAggrTrain <- 
+  award_winnersTrain %>%
+  group_by(playerID, yearID) %>%
+  summarise_at(vars(GG, MVP, SilvSlug, HankAaron, RookOfYear), funs(sum), na.rm = TRUE)
+# creating a total awards won column
+AwardsAggrTrain$totAwards <- rowSums(AwardsAggrTrain[3:7])
+
+#################################################################################
+### fielding stats for those in the 1985-2016 range
+#################################################################################
+# subsetting by players from the range of years important to our modeling
+field_subTrain <- subset(Fielding, playerID %in% playersTrain$playerID)
+# creating dummy variable to remove pitchers later
+field_subTrain$PitchFlag = ifelse(field_subTrain$POS == 'P',1,0)
+# summarizing stats over the course of the season for players who were traded or played several positions
+fieldingSumStatsTrain <- 
+ field_subTrain %>%
+ group_by(playerID, yearID) %>%
+ summarise_at(vars(G, GS, InnOuts, PO, A, E, DP, PitchFlag), funs(sum), na.rm = TRUE)
+# creating a number of positions played column to value that ability but remove split rows for player in season 
+fieldPOSCntTrain <- 
+  field_subTrain %>% 
+  select(playerID, yearID, POS) %>% 
+  group_by(playerID, yearID) %>% 
+  mutate(nPOS = n_distinct(POS))
+# merging the position counter with rest of fielding stats 
+field_mergeTrain <- 
+  merge(fieldingSumStatsTrain,
+        fieldPOSCntTrain, 
+        by.x = c("playerID","yearID"))
+# removing position column 
+fieldTrain <- 
+  field_mergeTrain %>% 
+  select(-POS) %>% 
+  distinct() %>% 
+  arrange(yearID)
+
+#################################################################################
+### salaries for those in the 1985-2016 range
+#################################################################################
+# subsetting by players in appropriate year range
+Salaries_sub <- subset(Salaries, playerID %in% playersTrain$playerID)
+# removing players without salary info
+Salariesfinal <- Salaries_sub %>% filter(salary != 0) %>% select(playerID, yearID, salary)
+# Keeping only max salary for players who were traded mid-season
+Salariesfinal <- Salariesfinal %>% group_by(playerID, yearID) %>% top_n(1,salary)
+
+#################################################################################
+### batting stats for those in the 1985-2016 range
+#################################################################################
+# subsetting by players in appropriate year range
+Batting_subTrain <- subset(Batting, playerID %in% playersTrain$playerID)
+# summarizing stats over the course of the season for players who were traded 
+BattingFinalTrain <- aggregate(cbind(G,AB,R,H,X2B,X3B,HR,RBI,SB,CS,BB,SO,IBB,HBP,SH,SF,GIDP) ~ playerID+yearID, 
+                         data = Batting_subTrain, FUN = sum, na.rm = TRUE)
+# creating several summary stats through package on Lahman to be used in modeling
+BattingFinalTrain <- battingStats(BattingFinalTrain)
+
+#################################################################################
+### merging all into one df
+#################################################################################
+# combining batting and fielding
+TableXTrain <- left_join(BattingFinalTrain, fieldTrain,  by=c("playerID", "yearID"))
+# adding salary data onto first merged df
+TableYTrain <- left_join(TableXTrain, Salariesfinal,  by=c("playerID", "yearID"))
+# removing the avg. cpi column from inflation to only have year and league min salary
+LeagueMins <- inflation[,-2]
+# joining second merged df onto league minimums while removing pitchers from df
+finalTrain <- left_join(TableYTrain[TableYTrain$PitchFlag == 0,], LeagueMins, by="yearID")
+# fill salary information for missing salaries with league minimum
+finalTrain <- finalTrain %>% mutate(salary = coalesce(salary,LeagueMinSal))
+# joining award winners onto data frame
+finalTrain <- left_join(finalTrain, AwardsAggrTrain, by = c("playerID", "yearID"))
+# removing NA's from player ID 
+finalTrain <- finalTrain[!is.na(finalTrain$playerID),]
+# ADJUST FOR INFLATION
+finalTrain <- merge(finalTrain, inflation[,-3], by.x = "yearID", by.y = "yearID")
+# divide by the CPI from 2021 to get dollars in approximate of current value
+finalTrain <- 
+  finalTrain %>% 
+  group_by(yearID) %>% 
+  mutate(adjSal = (271/ AvgCPI)*salary)
+# adding the player ID and team ID for a year onto train set to filter
+finalTrain <- left_join(finalTrain, playersfinTrain, by = "playerID")
+# creating age column in final DF
+finalTrain$Age <- finalTrain$yearID - finalTrain$birthYear
+# removing players who debuted this season b/c they will hurt model training with limited games/salary relationship
+finalTrain <- finalTrain[finalTrain$yearID != finalTrain$debutYear,] 
+# renaming for final cleaning tasks
+dfTrain <- finalTrain
+# remove columns from train that are similar
+dropTrain <- c("X","G.y", "PitchFlag", "LeagueMinSal", "AvgCPI", "birthYear")
+dfTrain <- dfTrain[,!(names(dfTrain) %in% dropTrain)]
+#renaming columns
+colsTrain <- c("yearID", "playerID", "Games", "AtBats", "Runs", "Hits", "Doubles", "Triples", "HomeRun", "RunsBattedIn", "StolenBases", "CaughtStealing", "Walk", "StrikeOut", "IntentionalWalk", "HitByPitch", "SacrificeHit", "SacrificeFly", "GroundIntoDoublePlay", "BattingAvg","PlateApps","TotalBases","SluggingPct","OnBasePerc","OPS","BABIP","GamesStarted","InnOuts","PutOuts","Assists",
+"Error","DoublePlay","nPOS", "Salary", "GG","MVP","SilvSlug","HankAaron","RookOfYear", "totAwards", "AdjustedSal", "debutYear", "Age")
+colnames(dfTrain) <- colsTrain
+# removing players with too few AB's and Games Played
+dfTrain <- dfTrain[!(dfTrain$Games <= 5 | dfTrain$AtBats <= 5),] 
+#removing players with no walks b/c they did not play in significant # of games
+dfTrain <- dfTrain[!(dfTrain$Walk == 0),]
+
+# creating additional columns for improved modeling
+dfTrain$ExtraBaseHits <- dfTrain$Doubles + dfTrain$Triples + dfTrain$HomeRun
+dfTrain$Singles <- dfTrain$Hits - dfTrain$ExtraBaseHits
+dfTrain$xbhPerhits <- round(dfTrain$ExtraBaseHits / dfTrain$Hits,3)
+dfTrain$WalkPerc <- round((dfTrain$IntentionalWalk + dfTrain$Walk) / dfTrain$PlateApps,3)
+dfTrain$StrikeOutperc <- round(dfTrain$StrikeOut / dfTrain$PlateApps,3)
+dfTrain$KtoBB <- round(dfTrain$StrikeOut / (dfTrain$Walk + dfTrain$IntentionalWalk),3)
+dfTrain$IsolatedPower <- round(((1*dfTrain$Doubles) + (2*dfTrain$Triples) + (3*dfTrain$HomeRun)) / dfTrain$AtBats,3)
+dfTrain$FieldingPerc <- round((dfTrain$PutOuts + dfTrain$Assists) / (dfTrain$PutOuts + dfTrain$Assists + dfTrain$Error),3)
+dfTrain$HomerPerAB <- round(dfTrain$HomeRun / dfTrain$AtBats,3)
+dfTrain$DoublePlayPerAB <- round(dfTrain$GroundIntoDoublePlay / dfTrain$AtBats,3)
+dfTrain$sacPerAB <- round(dfTrain$SacrificeHit / dfTrain$AtBats, 3)
+dfTrain$GG[is.na(dfTrain$GG)]<- 0
+dfTrain$MVP[is.na(dfTrain$MVP)]<- 0
+dfTrain$SilvSlug[is.na(dfTrain$SilvSlug)]<- 0
+dfTrain$HankAaron[is.na(dfTrain$HankAaron)]<- 0
+dfTrain$RookOfYear[is.na(dfTrain$RookOfYear)]<- 0
+dfTrain$totAwards[is.na(dfTrain$totAwards)]<- 0
+dfTrain$SqAge <- dfTrain$Age^2
+dfTrain$YearSinceDebut <- dfTrain$yearID - dfTrain$debutYear
+#################################################################################
+
+# Adding valuation information onto merged train data 
+t.dfTrain <- Fielding[,c("playerID", "yearID", "teamID")]
+t.dfTrain2 <- t.dfTrain %>% filter(yearID >= 1985, yearID <= 2022, playerID %in% dfTrain$playerID) %>% arrange(desc(yearID))
+t.dfTrain3 <- unique(t.dfTrain2)
+t.dfTrain4 <- left_join(dfTrain, t.dfTrain3, by.x = c("playerID", "yearID"), by.y = c("playerID", "yearID"))
+t.dfTrain5 <- t.dfTrain4 %>% group_by(playerID, yearID) %>% mutate(idCOL = row_number())
+t.dfTrain5 <- t.dfTrain5 %>% filter(idCOL == 1) %>% select(-idCOL)
+
+# merging valuation info into the combined df
+addTeamTrain <- merge(t.dfTrain5, valuedfTrain, by.x = c("yearID", "teamID"), by.y = c("yearID", "TeamID"), all = T)
+a1Train <- addTeamTrain %>% group_by(playerID, yearID) %>% mutate(idCOL = row_number()) %>% arrange(desc(idCOL))
+# removing repeat rows
+finTrain <- a1Train %>% filter(idCOL == 1, !is.na(playerID)) %>% select(-idCOL) %>% arrange(desc(yearID))
+# changing team ID's to match current team ID for teams that relocated
+finTrain$teamID <- as.character(finTrain$teamID)
+finTrain <- finTrain %>% mutate(teamID = ifelse(teamID != CurTeamID, CurTeamID, teamID))
+finTrain <- finTrain %>% select(-CurTeamID)
+
+# twoDecadesTrain <- finTrain %>% filter(yearID >= 2002) %>% arrange(desc(X))
+# twoDecadesTrain[1:226,"teamID"] <- twoDecadesTrain[1:226,"CurTeamID"]
+# twoDecadesTrain <- twoDecadesTrain %>% select(-X, -CurTeamID)
+
+# write to final csv for final ZIP submission 
+# write.csv(finTrain, file = "Team40_TrainSet_DSFINAL.csv")
+```
+
+# Test Set: Cleaning (Don't Run -- Upload CSV)
+```{r}
+#################################################################################
+### Only the players that played in the final game of 2021 season
+#################################################################################
+People$debut <- as.Date(People$debut)
+People$finalGame <- as.Date(People$finalGame)
+# sub-setting people into only most recent year for final deployment
+players <- 
+  People %>% 
+  filter(year(finalGame) >= 2021) %>%
+    select(playerID, nameFirst, nameLast, birthCountry, bats, throws, debut, finalGame, birthYear) %>%
+    arrange(desc(finalGame))
+# Creating column for year of debut
+players$debutYear <- year(players$debut)
+# USED TO REMOVE ROOKIE SEASONS FROM FINAL DF (TOO MANY LEAGUE MIN SALARIES)
+playersfin <- players[,c("playerID", "debutYear", "birthYear")] 
+#################################################################################
+### award winners in the 2021 season
+relAwards <- c("Most Valuable Player","Silver Slugger", "Gold Glove", "Rookie of the Year","Hank Aaron Award") 
+# subsetted column of awards with only winners from latest season
+winners <- 
+    AwardsPlayers %>% 
+    filter(yearID == 2021) %>%
+    select(playerID, awardID, yearID)
+# subset data frame of winners of important awards
+award_winners <- winners[winners$awardID %in% relAwards,]
+# creating dummy variables for each of the awards
+award_winners$GG <- ifelse(award_winners$awardID == "Gold Glove", 1, 0)
+award_winners$MVP <- ifelse(award_winners$awardID == "Most Valuable Player", 1, 0)
+award_winners$SilvSlug <- ifelse(award_winners$awardID == "Silver Slugger", 1, 0)
+award_winners$HankAaron <- ifelse(award_winners$awardID == "Hank Aaron Award", 1, 0)
+award_winners$RookOfYear <- ifelse(award_winners$awardID == "Rookie of the Year", 1, 0)
+
+# aggregating by player ID 
+AwardsAggr <- 
+  award_winners %>%
+  group_by(playerID, yearID) %>%
+  summarise_at(vars(GG, MVP, SilvSlug, HankAaron, RookOfYear), funs(sum), na.rm = TRUE)
+
+# total awards per player
+AwardsAggr$totAwards <- rowSums(AwardsAggr[3:7])
+
+#################################################################################
+### fielding stats for those still active at end of 2021 season
+#################################################################################
+# selecting only players that played final game in 2021 (still active)
+field_sub <- subset(Fielding, playerID %in% players$playerID)
+# maerker to remove pitchers later
+field_sub$PitchFlag = ifelse(field_sub$POS == 'P',1,0)
+# creating summarized stats per player per year
+fieldingSumStats <- 
+ field_sub %>%
+ group_by(playerID, yearID) %>%
+ summarise_at(vars(G, GS, InnOuts, PO, A, E, DP, PitchFlag), funs(sum), na.rm = TRUE)
+
+# removing and aggregating and adding number of positions played to combat for traded players
+fieldPOSCnt <- 
+  field_sub %>% 
+  select(playerID, yearID, POS) %>% 
+  group_by(playerID, yearID) %>% 
+  mutate(nPOS = n_distinct(POS))
+
+#merging subsets
+field_merge <- 
+  merge(fieldingSumStats,
+        fieldPOSCnt, 
+        by.x = c("playerID","yearID"))
+
+# removing position column
+field <- 
+  field_merge %>% 
+  select(-POS) %>% 
+  distinct() %>% 
+  arrange(yearID)
+
+#################################################################################
+### batting stats for those still active at end of 2021 season
+#################################################################################
+# subset based on players still active at end of 2021 season
+Batting_sub <- subset(Batting, playerID %in% players$playerID)
+# aggregating stats 
+BattingFinal <- aggregate(cbind(G,AB,R,H,X2B,X3B,HR,RBI,SB,CS,BB,SO,IBB,HBP,SH,SF,GIDP) ~ playerID+yearID, 
+                         data = Batting_sub, FUN = sum, na.rm = TRUE)
+# using lahman built in function to get several summary stats
+BattingFinal <- battingStats(BattingFinal)
+
+#################################################################################
+### merging all into one df
+#################################################################################
+# joining batting and fielding
+TableX = left_join(BattingFinal, field,  by=c("playerID", "yearID"))
+# joining first combined with awards
+final <- left_join(TableX, AwardsAggr, by = c("playerID", "yearID"))
+# keeping rows that are not NA
+final = final[!is.na(final$playerID),]
+# joining second comvined data set with the players team ID to filter for final deployment
+final <- left_join(final, playersfin, by = "playerID")
+# creaitng an age variable for modeling
+final$Age <- final$yearID - final$birthYear
+
+#renaming for ease
+df <- final
+# removing unneccesary columns
+drop <- c("X","G.y", "PitchFlag", "LeagueMinSal", "AvgCPI", "birthYear")
+df <- df[,!(names(df) %in% drop)]
+
+#renaming columns
+cols <- c("playerID", "yearID", "Games", "AtBats", "Runs", "Hits", "Doubles", "Triples", "HomeRun", "RunsBattedIn", "StolenBases", "CaughtStealing", "Walk", "StrikeOut", "IntentionalWalk", "HitByPitch", "SacrificeHit", "SacrificeFly", "GroundIntoDoublePlay", "BattingAvg","PlateApps","TotalBases","SluggingPct","OnBasePerc","OPS","BABIP","GamesStarted","InnOuts","PutOuts","Assists",
+"Error","DoublePlay","nPOS", "GG","MVP","SilvSlug","HankAaron","RookOfYear", "totAwards", "debutYear", "Age")
+colnames(df) <- cols
+
+# removing players with too few AB's and Games Played
+df <- df[!(df$Games <= 5 | df$AtBats <= 5),] 
+
+#removing players with no walks b/c they did not play in significant # of games
+df <- df[!(df$Walk == 0),] 
+
+# creating advanced stats
+df$ExtraBaseHits <- df$Doubles + df$Triples + df$HomeRun
+df$Singles <- df$Hits - df$ExtraBaseHits
+df$xbhPerhits <- round(df$ExtraBaseHits / df$Hits,3)
+df$WalkPerc <- round((df$IntentionalWalk + df$Walk) / df$PlateApps,3)
+df$StrikeOutperc <- round(df$StrikeOut / df$PlateApps,3)
+df$KtoBB <- round(df$StrikeOut / (df$Walk + df$IntentionalWalk),3)
+df$IsolatedPower <- round(((1*df$Doubles) + (2*df$Triples) + (3*df$HomeRun)) / df$AtBats,3)
+df$FieldingPerc <- round((df$PutOuts + df$Assists) / (df$PutOuts + df$Assists + df$Error),3)
+df$HomerPerAB <- round(df$HomeRun / df$AtBats,3)
+df$DoublePlayPerAB <- round(df$GroundIntoDoublePlay / df$AtBats,3)
+df$sacPerAB <- round(df$SacrificeHit / df$AtBats, 3)
+df$SqAge <- df$Age^2
+df$YearSinceDebut <- df$yearID - df$debutYear
+
+# removing players with zero extra base hits to avoid NA calculations
+df <- df %>% filter(!is.na(xbhPerhits))
+
+# Changing NA's to 0 for players that did not win an award
+df$GG[is.na(df$GG)]<- 0
+df$MVP[is.na(df$MVP)]<- 0
+df$SilvSlug[is.na(df$SilvSlug)]<- 0
+df$HankAaron[is.na(df$HankAaron)]<- 0
+df$RookOfYear[is.na(df$RookOfYear)]<- 0
+df$totAwards[is.na(df$totAwards)]<- 0
+
+# Adding the valuation data per team per year onto the existing dataset
+test.df <- Fielding[,c("playerID", "yearID", "teamID")]
+test.df2 <- test.df %>% filter(yearID == 2021, playerID %in% df$playerID) %>% arrange(desc(yearID))
+test.df3 <- unique(test.df2)
+test.df4 <- left_join(df, test.df3, by.x = c("playerID", "yearID"), by.y = c("playerID", "yearID"))
+test.df5 <- test.df4 %>% group_by(playerID, yearID) %>% mutate(idCOL = row_number())
+test.df5 <- test.df5 %>% filter(idCOL == 1) %>% select(-idCOL)
+
+addTeamTest <- merge(test.df5, valuedfTrain, by.x = c("yearID", "teamID"), by.y = c("yearID", "TeamID"), all = T)
+a1test <- addTeamTest %>% group_by(playerID, yearID) %>% mutate(idCOL = row_number()) %>% arrange(desc(idCOL))
+finTEST <- a1test %>% filter(idCOL == 1, !is.na(playerID)) %>% select(-idCOL) %>% arrange(desc(yearID))
+testSet <- finTEST %>% filter(yearID == 2021) %>% arrange(desc(yearID))
+
+# Filtering final test set on the team we wish to deploy model onto
+deployDF <- testSet %>% filter(teamID == "SFN") %>% select(-CurTeamID)
+
+# writing the CSV to be used to deploy model and zipped into submission
+# write.csv(deployDF, file = "Team40_TestSet_DSFINAL.csv")
+```
+
+# Exploratory Data Analysis
+```{r}
+############################################################################
+## Exploratory Visualizations
+############################################################################
+hist(baseball$OPS, breaks = 100)
+hist(baseball$OnBasePerc, breaks = 100)
+hist(baseball$AtBats, breaks = 100)
+hist(baseball$Hits, breaks = 100)
+############################################################################
+
+############################################################################
+## VIZ 1: Differential Between Min and Max Salaries Over Time
+############################################################################
+fullSal.df <- baseball
+difVIZ <- fullSal.df %>% group_by(yearID) %>% summarise(minSal = min(AdjustedSal), maxSal = max(AdjustedSal))
+# manipulating table format for visualization
+viz_A <- difVIZ %>% pivot_longer(cols = minSal:maxSal)
+
+VIZ_1 <-
+  viz_A %>% 
+  ggplot(aes(x = yearID, y = value)) + 
+  geom_line(aes(group = yearID),color="black", size = .75) +
+  geom_point(aes(x = yearID, color = yearID), stat = 'identity', size = 1.5) +
+  theme_bw() +
+  labs(y = "Salary", x = "Year", 
+       title = "Differential Between Min and Max Salaries Over Time") +
+  scale_x_continuous(breaks = viz_A$yearID, labels = viz_A$yearID) +
+  scale_y_continuous(breaks = seq(0, 45000000, 5000000),
+                     labels = label_number(suffix = "M", scale = 1e-6)) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        plot.title = element_text(hjust = 0.52, size = 14, face = "bold"),
+        legend.text = element_text(face = "bold"),
+        legend.title = element_text(face = "bold", size = 10)) +
+  scale_colour_gradientn(name = "Year", colors = c("blue", "red"))
+
+############################################################################
+## VIZ 2: Change in average team valuations over time
+############################################################################
+valueDF <- valuedfTrain[,c("yearID", "Valuation", "CurTeamID")]
+renameCols <- c("Year", "Valuation", "Team")
+colnames(valueDF) <- renameCols
+as.numeric(valueDF$Valuation)
+
+# aggregating average valuation by year
+viz2Agg <- 
+  valueDF %>% 
+  group_by(Year) %>% 
+  summarise(AvgVal = round(mean(Valuation)))
+
+# removing any NAs
+viz2Agg <- viz2Agg[!is.na(viz2Agg$Year),]
+
+VIZ_2 <- 
+  viz2Agg %>% 
+  ggplot(aes(x = Year, y = AvgVal, fill = AvgVal)) +
+  geom_col(stat = "count") +
+  geom_smooth(color = "navy", se=F) +
+  theme_bw() +
+  labs(y = "Avg. Team Valuation (Millions)", x = "Year", 
+       title = "Increasing Value of MLB Franchises") +
+  scale_x_continuous(breaks = viz2Agg$Year, labels = viz2Agg$Year) +
+  scale_y_continuous(breaks = seq(0, 2200, 175),
+                     labels = label_number(suffix = "M")) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        plot.title = element_text(hjust = 0.52, size = 14, face = "bold"),
+        legend.text = element_text(face = "bold"),
+        legend.title = element_text(face = "bold", size = 10)) +
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+          axis.line = element_line(colour = "black"))+
+  scale_fill_distiller(name = "Dollars (M)", palette = "Greens", direction = 1)
+
+############################################################################
+## VIZ 3: Correlation Plot
+############################################################################
+# first checking correlations between all summary stats 
+advStats <- c("BattingAvg", "SluggingPct", "OnBasePerc", "OPS", "BABIP", "xbhPerhits",
+              "WalkPerc", "StrikeOutperc", "KtoBB", "IsolatedPower", "FieldingPerc",
+              "HomerPerAB","DoublePlayPerAB", "sacPerAB")
+
+advDF <- baseball[,advStats]
+advCOR <- cor(advDF)
+# manipulating table strucutre for viz 
+moltAdvCor <- melt(advCOR)
+# first checking all the correlations with one another
+firstRunADV <- 
+  moltAdvCor %>% 
+  ggplot(aes(x=X1, y=X2, fill=value)) +
+  geom_tile()+
+  scale_fill_distiller(name = "Correlation", palette = "RdYlBu", direction = -1) +
+  labs(y = "Variables", x = "Variables", 
+       title = "Correlation Matrix") +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        plot.title = element_text(hjust = 0.52, size = 14, face = "bold"),
+        legend.text = element_text(face = "bold"),
+        legend.title = element_text(face = "bold", size = 10))
+# checking after removing highly correlated columns
+FINALRunADV <- 
+  moltAdvCor %>% 
+  filter(X1 %notin% c("SluggingPct", "OnBasePerc", "BattingAvg", "IsolatedPower"),
+         X2 %notin% c("SluggingPct", "OnBasePerc", "BattingAvg", "IsolatedPower")) %>% 
+  ggplot(aes(x=X1, y=X2, fill=value)) +
+  geom_tile()+
+  scale_fill_distiller(name = "Correlation", palette = "RdYlBu", direction = -1)+
+  labs(y = "Variables", x = "Variables", 
+       title = "Correlation Matrix") +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        plot.title = element_text(hjust = 0.52, size = 14, face = "bold"),
+        legend.text = element_text(face = "bold"),
+        legend.title = element_text(face = "bold", size = 10))
+
+############################################################################
+# next checking regular numeric stats
+regStats <- c("yearID", "Games","AtBats","Runs","Hits","HomeRun","RunsBattedIn","StolenBases","CaughtStealing", 
+              "Walk", "StrikeOut", "IntentionalWalk" ,"GroundIntoDoublePlay", "PlateApps" ,"TotalBases" ,"PutOuts" ,
+              "Assists", "Error" ,"DoublePlay" ,"nPOS" , "Age" ,"ExtraBaseHits" ,"YearSinceDebut")
+regDF <- baseball[,regStats]
+regCOR <- cor(regDF)
+moltRegCor <- melt(regCOR)
+# checking correlation with all of them and each other
+firstRunREG <- 
+  moltRegCor %>% 
+  ggplot(aes(x=X1, y=X2, fill=value)) +
+  geom_tile()+
+  scale_fill_distiller(name = "Correlation", palette = "RdYlBu", direction = -1)+
+  labs(y = "Variables", x = "Variables", 
+       title = "Correlation Matrix") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        plot.title = element_text(hjust = 0.52, size = 14, face = "bold"),
+        legend.text = element_text(face = "bold"),
+        legend.title = element_text(face = "bold", size = 10))
+# running cor matrix again after removing highly correlated variables
+FINALRunREG <-
+  moltRegCor %>% 
+  filter(X1 %notin% c("Games", "AtBats", "RunsBattedIn", "PlateApps", "TotalBases", "ExtraBaseHits", "PutOuts" ,
+              "Assists", "Error"),
+         X2 %notin% c("Games", "AtBats", "RunsBattedIn", "PlateApps", "TotalBases", "ExtraBaseHits", "PutOuts" ,
+              "Assists", "Error")) %>% 
+  ggplot(aes(x=X1, y=X2, fill=value)) +
+  geom_tile()+
+  scale_fill_distiller(name = "Strength of Correlation", palette = "RdYlBu", direction = -1)+
+  labs(y = "Variables", x = "Variables", 
+       title = "Correlation Matrix") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        plot.title = element_text(hjust = 0.52, size = 14, face = "bold"),
+        legend.text = element_text(face = "bold"),
+        legend.title = element_text(face = "bold", size = 10))
+
+############################################################################
+# running a final correlation matrix after checking correlations individually and now combine to see all correlations used in model
+corCOLS <- c("yearID", "Games","AtBats","Runs","Hits","HomeRun","RunsBattedIn","StolenBases","CaughtStealing", 
+  "Walk", "StrikeOut", "IntentionalWalk" ,"GroundIntoDoublePlay", "PlateApps" ,"TotalBases" ,"PutOuts" ,
+  "Assists", "Error" ,"DoublePlay" ,"nPOS" , "Age" ,"ExtraBaseHits" ,"YearSinceDebut","BattingAvg", "SluggingPct",
+  "OnBasePerc", "OPS", "BABIP", "xbhPerhits", "WalkPerc", "StrikeOutperc", "KtoBB", "IsolatedPower", "FieldingPerc",
+  "HomerPerAB","DoublePlayPerAB", "sacPerAB")
+corels <- baseball[,corCOLS]
+COR.df <- cor(corels)
+meltCOR.df <- melt(COR.df)
+
+# creating final correlation matrix
+VIZ_3 <- 
+  meltCOR.df %>% 
+  filter(X1 %notin% c("SluggingPct", "OnBasePerc", "BattingAvg", "IsolatedPower","Games", "AtBats", 
+                      "RunsBattedIn", "PlateApps", "TotalBases", "ExtraBaseHits", "PutOuts" , "Assists", 
+                      "Error"),
+         X2 %notin% c("SluggingPct", "OnBasePerc", "BattingAvg", "IsolatedPower","Games", "AtBats", 
+                      "RunsBattedIn", "PlateApps", "TotalBases", "ExtraBaseHits", "PutOuts" , "Assists", 
+                      "Error")) %>% 
+  ggplot(aes(x=X1, y=X2, fill=value)) +
+  geom_tile()+
+  scale_fill_distiller(name = "Correlation", palette = "RdYlBu", direction = -1)+
+  labs(y = "Variables", x = "Variables", 
+       title = "Correlation Matrix") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        plot.title = element_text(hjust = 0.52, size = 14, face = "bold"),
+        legend.text = element_text(face = "bold"),
+        legend.title = element_text(face = "bold", size = 10))
+
+############################################################################
+## VIZ 4: Piecewise Plots
+############################################################################
+bigCOR.ADV <- ggpairs(advDF)
+bigCOR.REG <- ggpairs(regDF)
+
+# Important columns piecewise plot
+VIZ_4 <- ggpairs(baseball, columns = c("AdjustedSal", "YearSinceDebut", "HomeRun", "Walk","Runs",
+                              "Hits", "IntentionalWalk"))
+
+############################################################################
+## VIZ 5: Stat Trends Over Time (AVERAGES)
+############################################################################
+# taking average stats over time only for players with approx. full season worth of AB's
+tr1 <- 
+  fullSal.df %>%
+  filter(AtBats >= 400) %>% 
+  group_by(yearID) %>% 
+  summarise_at(vars("Runs","Hits","HomeRun","RunsBattedIn","StolenBases","CaughtStealing",
+  "Walk", "StrikeOut", "IntentionalWalk" ,"GroundIntoDoublePlay", "PlateApps" ,"TotalBases" ,"PutOuts" ,
+  "Assists", "Error" ,"DoublePlay" ,"nPOS" , "Age" ,"ExtraBaseHits" ,"YearSinceDebut","BattingAvg", 
+  "OPS", "BABIP", "xbhPerhits", "WalkPerc", "StrikeOutperc", "KtoBB", "IsolatedPower", "FieldingPerc",
+  "HomerPerAB","DoublePlayPerAB", "sacPerAB"), funs(mean), na.rm = T)
+
+tr2 <- round(tr1, 3)
+tr2 <- as.data.frame(tr2)
+tr3 <- melt(tr2, "yearID")
+
+# change in on base plus slugging over time 
+OPSchange <- 
+  tr3 %>%
+  filter(variable == "OPS") %>% 
+  ggplot(aes(x = yearID, y = value, fill = value)) +
+  geom_line(aes(label = value))+
+  theme_bw() +
+  labs(y = "Avg. OPS Per Season", x = "Year", 
+       title = "Change In Avg. OPS Per Season",
+       subtitle = "Players Qualify With Greater Than 400 At Bats") +
+  scale_x_continuous(breaks = tr3$yearID[1:31], labels = tr3$yearID[1:31]) +
+  scale_y_continuous(breaks = seq(0, .500, .075)) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        plot.title = element_text(hjust = 0.52, size = 14, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.52, size = 10, face = "italic"),
+        legend.text = element_text(face = "bold"),
+        legend.title = element_text(face = "bold", size = 10)) +
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+          axis.line = element_line(colour = "black"))
+
+
+############################################################################
+## VIZ 6: Stat Trends Over Time (SUM)
+############################################################################
+# taking total of each counted metric and dividing by 30 teams to get average per team per year
+totSums <- 
+  fullSal.df %>%
+  group_by(yearID) %>% 
+  summarise_at(vars("Runs","Hits","HomeRun","RunsBattedIn","StolenBases","CaughtStealing",
+  "Walk", "StrikeOut", "IntentionalWalk" ,"GroundIntoDoublePlay", "PlateApps" ,"TotalBases" ,"PutOuts" ,
+  "Assists", "Error" ,"DoublePlay" ,"ExtraBaseHits"), funs(sum), na.rm = T)
+
+totSums1 <- round(totSums, 3)
+totSums1 <- as.data.frame(totSums1)
+totSums2 <- melt(totSums1, "yearID")
+totSums2$valuePer30 <- totSums2$value / 30
+
+# change in average homers per team over time
+hrChange <- 
+  totSums2 %>%
+  filter(variable == "HomeRun") %>% 
+  ggplot(aes(x = yearID, y = valuePer30, fill = valuePer30)) +
+  geom_col(stat = "count") +
+  theme_bw() +
+  labs(y = "Total Homeruns Per Season", x = "Year", 
+       title = "Change In Avg. Total Homeruns Per Team Per Season",
+       subtitle = 'Homerun totals were at a peak during the "steroid era"') +
+  scale_x_continuous(breaks = totSums2$yearID[1:31], labels = totSums2$yearID[1:31]) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        plot.title = element_text(hjust = 0.52, size = 14, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.52, size = 10, face = "italic"),
+        legend.text = element_text(face = "bold"),
+        legend.title = element_text(face = "bold", size = 10)) +
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+          axis.line = element_line(colour = "black")) +
+    scale_fill_distiller(name = "HomeRuns", palette = "Greens", direction = 1)
+
+############################################################################
+## All visualizations
+############################################################################
+VIZ_1 # min and max salary growth over time
+VIZ_2 # change in team valuations over time
+firstRunADV
+firstRunREG
+FINALRunADV
+FINALRunREG
+VIZ_3 #final cor matrix
+VIZ_4 # imp column piecewise
+bigCOR.ADV
+bigCOR.REG
+OPSchange # change in OPS over time
+hrChange # change in homers per team over time
+```
+
+# LASSO: Variable Selection 
+```{r}
+# LASSO Analysis for Linear Regression Model (Mostly not using, but just in case)
+set.seed(1)
+
+Mx <- data.matrix(baseball[!names(baseball) %in% c("playerID" ,"yearID" , "AdjustedSal","Salary", "Games", "debutYear")])
+My <-   baseball$AdjustedSal
+
+cv_model <- cv.glmnet(Mx, My, alpha = 1, lambda = c(0.0001,0.001, 0.01, 0.02, 0.05, 0.1))
+summary(cv_model)
+
+min_lambda <- cv_model$lambda.min
+se_lambda <- cv_model$lambda.1se
+
+lassoSE <- glmnet(Mx,My, lambda = min_lambda)
+summary(lassoSE)
+
+# These are the variables important as determined by LASSO
+lassoSE$beta
+```
+
+# Training Model:  K-Fold Cross Validation
+```{r}
+# Removing everything before 2002 because we do not have team valuation data from before that
+# we still used the 1986-2016 data for our EDA but cannot train model with NA values in data set
+train_baseball <- drop_na(baseball)
+
+# create a vector of fold memberships (random order)
+n <- nrow(train_baseball)
+nfold <- 10
+set.seed(1)
+foldid <- rep(1:nfold,each=ceiling(n/nfold))[sample(1:n)]
+
+### create an empty data frame for the results of the models
+OOS <- data.frame(model1=rep(NA,nfold), model2=rep(NA,nfold), model3=rep(NA,nfold), model4=rep(NA,nfold),
+                  model5=rep(NA,nfold), model6=rep(NA,nfold), model7=rep(NA,nfold), 
+                  model8 =rep(NA, nfold)) 
+
+### Use a for loop to run through the nfold trails
+for(k in 1:nfold){
+    train <- which(foldid!=k) # train on all but fold `k'
+    
+    # Baseline random forest model 
+    model1 <- randomForest(log(AdjustedSal) ~ . -Games - Salary - debutYear - totAwards, nodesize=5, 
+                           ntree = 100, mtry = 7, data = train_baseball, subset = train)
+    
+    # Random Forest model with certain relevant performance metrics included based on domain knowledge
+    model2 <- randomForest(log(AdjustedSal) ~ yearID + Games + Age + SqAge + YearSinceDebut + HomeRun +
+                               StolenBases + Runs + CaughtStealing + StrikeOut+ Walk + BattingAvg + OPS +
+                               BABIP + nPOS + xbhPerhits + WalkPerc + StrikeOutperc + KtoBB +
+                               IsolatedPower + FieldingPerc + HomerPerAB + DoublePlayPerAB + sacPerAB,
+                           nodesize=5, ntree = 100, mtry = 7, data = train_baseball, subset = train)
+                           
+    
+    # Baseline Linear regression model 
+    model3 <- glm(log(AdjustedSal) ~ . -Games - Salary - debutYear - totAwards,
+                  data = train_baseball, subset = train)
+    
+    # Linear regression model with certain relevant performance metrics included based on domain knowledge
+    model4 <- glm(log(AdjustedSal) ~ yearID + Games + Age + SqAge + YearSinceDebut + HomeRun +
+                      StolenBases + Runs + CaughtStealing + StrikeOut+ Walk + BattingAvg + OPS +
+                      BABIP + nPOS + xbhPerhits + WalkPerc + StrikeOutperc + KtoBB +IsolatedPower +
+                      FieldingPerc + HomerPerAB + DoublePlayPerAB + sacPerAB,
+                      data = train_baseball, subset = train)
+    
+    # Regression tree model with almost all variables included
+    model5 <- rpart(log(AdjustedSal) ~ .-Games-Salary-totAwards-debutYear,cp=0.0025, data = train_baseball,
+                    method = 'anova', subset = train)
+        
+    # Regression tree model with certain relevant performance metrics included based on domain knowledge
+    model6 = rpart(log(AdjustedSal) ~ yearID + Games + Age + SqAge + YearSinceDebut + HomeRun +
+                        StolenBases + Runs + CaughtStealing + StrikeOut+ Walk + BattingAvg + OPS +
+                        BABIP + nPOS + xbhPerhits + WalkPerc + StrikeOutperc + KtoBB +IsolatedPower +
+                        FieldingPerc + HomerPerAB + DoublePlayPerAB + sacPerAB,
+                    cp=0.0025, data = train_baseball, method = 'anova', subset = train)
+    
+    # Final Random Forest Model with most relevant variables based in EDA analysis 
+    model7 <- randomForest(log(AdjustedSal) ~ yearID + Games + Age + SqAge + YearSinceDebut + HomeRun +
+                               StolenBases + Runs + Hits+ CaughtStealing + StrikeOut+ Walk + BattingAvg +
+                               OPS + IntentionalWalk + BABIP + GroundIntoDoublePlay + DoublePlay + nPOS +
+                               xbhPerhits + WalkPerc + StrikeOutperc + KtoBB + FieldingPerc + HomerPerAB +
+                               DoublePlayPerAB + sacPerAB ,nodesize=5, ntree = 100, mtry = 7, 
+                           data = train_baseball, subset = train)
+    
+    #Model with valuations included (only 2002-2022)
+    model8 <- randomForest(log(AdjustedSal) ~ yearID + Games + Age + SqAge + YearSinceDebut + HomeRun +
+                               StolenBases + Runs + Hits+ CaughtStealing + StrikeOut+ Walk + BattingAvg +
+                               OPS + IntentionalWalk + BABIP + GroundIntoDoublePlay + DoublePlay + nPOS +
+                               xbhPerhits + WalkPerc + StrikeOutperc + KtoBB + FieldingPerc + HomerPerAB +
+                               DoublePlayPerAB + sacPerAB + Valuation,nodesize=5, ntree = 100, mtry = 7, 
+                           data = train_baseball, subset = train)
+    
+    
+    # Making predictions for each model on the holdout sample
+    pred.model1 = exp(predict(model1, newdata=train_baseball[-train,]))
+    pred.model2 = exp(predict(model2, newdata=train_baseball[-train,]))
+    pred.model3 = exp(predict(model3, newdata=train_baseball[-train,]))
+    pred.model4 = exp(predict(model4, newdata=train_baseball[-train,]))
+    pred.model5 = exp(predict(model5, newdata=train_baseball[-train,]))
+    pred.model6 = exp(predict(model6, newdata=train_baseball[-train,]))
+    pred.model7 = exp(predict(model7, newdata=train_baseball[-train,]))
+    pred.model8 = exp(predict(model8, newdata=train_baseball[-train,]))
+    
+    # Using RMSE as the Out-ofSample metric to test the models on the holdout sample
+    OOS$model1[k] = rmse(train_baseball$AdjustedSal[-train],pred.model1)
+    OOS$model2[k] = rmse(train_baseball$AdjustedSal[-train],pred.model2)
+    OOS$model3[k] = rmse(train_baseball$AdjustedSal[-train],pred.model3)
+    OOS$model4[k] = rmse(train_baseball$AdjustedSal[-train],pred.model4)
+    OOS$model5[k] = rmse(train_baseball$AdjustedSal[-train],pred.model5)
+    OOS$model6[k] = rmse(train_baseball$AdjustedSal[-train],pred.model6)
+    OOS$model7[k] = rmse(train_baseball$AdjustedSal[-train],pred.model7)
+    OOS$model8[k] = rmse(train_baseball$AdjustedSal[-train],pred.model8)
+    #mn = mean(pred.reg1 + pred.reg2 + pred.reg3 + pred.reg4 + pred.reg5 + pred.reg6)
+    #OOS$reg7[k] = rmse(baseball$AdjustedSal[-train],mn)
+
+    print(paste("Iteration",k,"of",nfold,"(thank you for your patience)"))
+    
+}
+
+# Average RMSE for each model over 10 folds
+colMeans(OOS)
+
+# Plotting the RMSE for all folds 
+m.OOS <- as.matrix(OOS)
+rownames(m.OOS) <- c(1:nfold)
+barplot(t(as.matrix(OOS)), beside=TRUE,
+        ylab= bquote( "Out of Sample " ~ RMSE), xlab="Fold", names.arg = c(1:10))
+
+# Plotting variable importance for the final Random Forest model (This is our best model!!!!)
+imp <- varImpPlot(model8) # Saving the varImp object
+imp <- as.data.frame(imp)
+imp$varnames <- rownames(imp) # Adding row names as a column
+rownames(imp) <- NULL
+
+# Plotting node purity
+PurityPlot <- 
+  ggplot(imp, aes(x=reorder(varnames, IncNodePurity), y=IncNodePurity)) +
+  geom_point(color = "navy") +
+  geom_segment(aes(x=varnames,xend=varnames,y=0,yend=IncNodePurity), color = "navy") +
+  coord_flip() + 
+  theme_bw() +
+  labs(y = "IncNodePurity", x = "Variable", 
+       title = "Cross Validation Variable Purity") +
+  theme(axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        plot.title = element_text(hjust = 0.52, size = 14, face = "bold"),
+        legend.text = element_text(face = "bold"),
+        legend.title = element_text(face = "bold", size = 10))
+PurityPlot
+
+# Generating a plot of the errors against the number of trees used in the model
+plot(model8)
+```
+
+# Deployment: Best Model Tested On 2021 San Francisco Giants
+```{r}
+# Deploying the best model (model 8) on active players from 2021 San Francisco Giants
+
+model8 <- randomForest(log(AdjustedSal) ~ yearID + Games + Age + SqAge + YearSinceDebut + HomeRun +
+                               StolenBases + Runs + Hits+ CaughtStealing + StrikeOut+ Walk + BattingAvg +
+                               OPS + IntentionalWalk + BABIP + GroundIntoDoublePlay + DoublePlay + nPOS +
+                               xbhPerhits + WalkPerc + StrikeOutperc + KtoBB + FieldingPerc + HomerPerAB +
+                               DoublePlayPerAB + sacPerAB + Valuation, nodesize=5, ntree = 100, mtry = 7, 
+                      data = train_baseball)
+SalaryPredictions <- cbind(deployment, exp(predict(model8, newdata = deployment)))
+
+# taking only the name and prediction columns 
+PredictResults <- SalaryPredictions %>% select("playerID", `exp(predict(model8, newdata = deployment))`)
+
+# For final table to add into paper/slides, change columns, and find 2022 salaries from online and put in there
+resultCols <- c("ID", "SalaryPrediction")
+colnames(PredictResults) <- resultCols
+
+ResultsNamed <- merge(dep_names, PredictResults, by.x = "playerID", by.y = "ID")
+ResultsNamed <- ResultsNamed[order(ResultsNamed$Names),2:3]
+
+nonIncluded <- c("Anthony DeSclafani", "Johnny Cueto", "Kevin Gausman", "Logan Webb", "Steven Duggar", "Skye Bolt")
+GiantPreds <- ResultsNamed[ResultsNamed$Names %notin% nonIncluded,]
+
+Actual2022Salary <- c(1000000, 1850000, 18400000, 16000000, 22202777, 2600000, 
+                   3000000, 4500000,19500000, 700000, 730000, 715000, 3700000, 
+                   715000, 5200000, 3500000)
+
+FINALTABLE <- as.data.frame(cbind(GiantPreds, Actual2022Salary))
+
+FINALTABLE$Difference <- FINALTABLE$SalaryPrediction - FINALTABLE$Actual2022Salary
+
+# Interpreting performance based on difference
+FINALTABLE %>% arrange(desc(Difference)) # Ordered in order of most UNDERVALUED players by our model
+
+FINALTABLE %>% arrange(Difference) # Ordered in order of most OVERVALUED players by our model
+```
+
+
