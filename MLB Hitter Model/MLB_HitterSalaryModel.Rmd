@@ -1,5 +1,5 @@
 ---
-title: "Data Science Final Project"
+title: "DSFP: MLB Hitter Salary Prediction Model"
 author: "Ethan Shear & Team 40"
 date: "October 2022"
 output: html_document
