@@ -19,23 +19,25 @@ since debut" feature.
 There were several motivations leading to the undertaking of this project. 
 
 - I looked to gain a deeper understanding of the different modeling choices I could make given my target outcome.
-    * It was important for me to have an understanding of the different steps of the modeling process and how to evaluate the effectiveness 
-      of different choices.
-- My teammates participating in this project with had little domain knowledge
-    * Designing a project that helped teach my peers about a popular US sport through the application of data science expertise helped
-      understand an unfamiliar sport through a familar lens.
+    * I wanted to improve my understanding of the different steps in the modeling process and how to evaluate the 
+      effectiveness of different modeling choices.
+- My teammates participating in this project had little domain knowledge
+    * Designing a project that helped teach my peers about a popular US sport through the application of data science 
+      expertise helped them understand an unfamiliar sport through a familiar lens.
 - Establish modeling experience through the twists and turns of undertaking a broad topic
-    * There were many different routes that we could have gone down to develop an effective model with such a broad topic goal. While this
-      did not make the project easier, I was able to think about the factors that should be considered in the undertaking of future projects.
+    * We could have gone down many different routes to develop an effective model with such a broad topic goal. While 
+    this did not make the project easier, I considered many different angles and the factors that must be addressed when 
+    undertaking future projects.
     
     
-I learned several lessons through working with my team in the development of this project.
+I learned several lessons through working with my team in developing this project.
 
-- More specific project goals are easier to handle because there is less ambiguity in determining which features to include and their evlauating
-their ability to predict the target variable.
+- More specific project goals are easier to handle because there is less ambiguity in determining which features to include 
+   and their evaluating their ability to predict the target variable.
 - Individuals from a range of backgrounds offer perspectives that help shape modeling choices and performance analysis
-- Baseball salaries are based on significnatly more information that past performance
-- Model evaluation is not always going to be a clear accurary metric, but sometimes requires understanding of model outputs to determine its utility.
-
-
-
+- Baseball salaries are based on significantly more information than past performance
+- Model evaluation will not always be a clear accuracy metric, but sometimes requires understanding model output context to 
+  determine its utility.
+  
+  
+  
