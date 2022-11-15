@@ -2,18 +2,7 @@ Ethan Shear
 November 15, 2022
 
 Summary:
-- Each task that members on MLB front offices undertake involve some form of player evaluation. The goal of this project was to build a basic
-evaluation model that takes player results and determines a "ballpark" salary value according to those features. The model could help executives
-determine an arbitrary salary figure, but more importantly, asses how the player performs relative to the salary they earned in a given season. It also
-helps compare a player and their salary to the rest of the players in the league and their salaries, affording more of a qualitative "value" benchmark
-as opposed to a raw salary figure that the player is worth. In reality, player salaries account for more than the results a player had in years prior; 
-team value, inflation, marketability, importance to team culture/locker room and more features are accounted for when GM's offer player contracts. 
-My team and I looked to account for some of these non-results oriented features in our model but were unable to acquire the full scope of data neccesary
-for each player given our time-frame for completion. We evaluated the effectiveness of the model as the difference between predicted salary and actual salary.
-The model worked quite well with players in their pre arbitration through arbitration years but struggled at the upper end of AAV as it underpredicted
-these figures. Still, the deployment on 2021 results data afforded insights including the undervalue of players, such as Wilmer Flores, who was afforded 
-an extension prior to the 2022 season. In the future, this model could be improved by accouting for play by play data and ball flight metrics to incorporate
-features that help determine projectability outside of a mere "years since debut" feature. 
+- Each MLB front office task involves some form of player evaluation. This project aimed to build a basic evaluation model that takes player results and determines a "ballpark" salary value according to those features. The model could help executives determine an arbitrary salary figure, but more importantly, asses how the player performs relative to the salary they earned in a given season. It also helps compare a player and their salary to the other players in the league and their salaries, affording more of a qualitative "value" benchmark than a "raw" salary figure that the player is worth. In reality, player salaries account for more than a player's results in years prior; team value, inflation, marketability, importance to team culture/locker room, and more features are accounted for when GMs offer player contracts. My team and I looked to account for some of these non-results-oriented features in our model. Still, we required additional data to acquire the full scope of data necessary to improve predictions for each player, given our time frame for completion. We evaluated the model's effectiveness as the difference between predicted and actual salaries. The model worked quite well with players in their pre-arbitration through arbitration years but struggled at the upper end of AAV as it underpredicted these figures. Still, deploying the model on 2021 results data afforded insights, including undervalued players like Wilmer Flores, who received an extension after the 2021 season. This model could be improved in the future by accounting for play-by-play data and ball flight metrics to incorporate features that help determine projectability outside of a mere "years since debut" feature. 
 
 There were several motivations leading to the undertaking of this project. 
 
