@@ -1,7 +1,7 @@
 ---
 title: "Data Science Final Project"
-author: "Team 40: Aayush Chordia (ac830), Haoyang Dong (hd102), Deepika Karan (dr287), Ethan Shear (els94), Anh Tuong (avt8)"
-date: "October 14, 2022"
+author: "Ethan Shear & Team 40"
+date: "October 2022"
 output: html_document
 ---
 
@@ -43,7 +43,7 @@ valuedfTrain <- read.csv("mlbValuations.csv")
 
 
 # read in train data
-baseball <- read.csv("Team40_TrainSet_DSFINAL.csv")
+baseball <- read.csv("MLBMOD_train.csv")
   # Dropping playerID for the modeling part
   baseball <- baseball[!names(baseball) %in% c("playerID")]
   # Dropping X for the modeling part
@@ -52,7 +52,7 @@ baseball <- read.csv("Team40_TrainSet_DSFINAL.csv")
   baseball <- baseball[!(is.na(baseball$xbhPerhits) | is.na(baseball$FieldingPerc)),]
 
   # read in test data
-deployment <- read.csv("Team40_TestSet_DSFINAL.csv")
+deployment <- read.csv("MLBMOD_test.csv")
 #  deployment <- deployment %>% select(-X)
 
 # Creating Names Table for final results clairty
@@ -252,7 +252,7 @@ finTrain <- finTrain %>% select(-CurTeamID)
 # twoDecadesTrain <- twoDecadesTrain %>% select(-X, -CurTeamID)
 
 # write to final csv for final ZIP submission 
-# write.csv(finTrain, file = "Team40_TrainSet_DSFINAL.csv")
+# write.csv(finTrain, file = "MLBMOD_train.csv")
 ```
 
 # Test Set: Cleaning (Don't Run -- Upload CSV)
@@ -416,7 +416,7 @@ testSet <- finTEST %>% filter(yearID == 2021) %>% arrange(desc(yearID))
 deployDF <- testSet %>% filter(teamID == "SFN") %>% select(-CurTeamID)
 
 # writing the CSV to be used to deploy model and zipped into submission
-# write.csv(deployDF, file = "Team40_TestSet_DSFINAL.csv")
+# write.csv(deployDF, file = "MLBMOD_test.csv")
 ```
 
 # Exploratory Data Analysis
