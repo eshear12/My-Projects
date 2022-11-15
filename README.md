@@ -1,3 +1,3 @@
 # My Projects
 
-Location for Ethan's data projects
+Here is where Ethan's data projects are stored.
